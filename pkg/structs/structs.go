@@ -10,11 +10,11 @@ import (
 func GenerateID() int32 {
     var randomUint uint64
 	binary.Read(rand.Reader, binary.BigEndian, &randomUint)
-	id := int(randomUint)
+	id := int32(randomUint)
 	if id < 0 {
         id = -id
     }
-	return int32(id)
+	return id
 }
 
 
