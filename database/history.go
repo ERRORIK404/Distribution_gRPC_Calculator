@@ -1,22 +1,20 @@
 package database
 
 import (
-	"database/sql"
-
 	models "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/db_models"
 )
 
-func AddHistoryEntry(db *sql.DB, username string, expr, result string) error {
-    _, err := db.Exec(
-        "INSERT INTO history (user_login, expression, result) VALUES (?, ?, ?)",
-        username, expr, result,
+func (h *DB) AddHistoryEntry(id int32, username string,  result float64, expr, status string) error {
+    _, err := h.DB.Exec(
+        "INSERT INTO history (id, user_login, expression, result, status) VALUES (?, ?, ?, ?, ?)",
+        id, username, expr, result, status,
     )
     return err
 }
 
-func GetUserHistoryByLogin(db *sql.DB, login string) ([]models.HistoryEntry, error) {
-    rows, err := db.Query(
-        "SELECT id, expression, result, timestamp FROM history WHERE user_login = ?",
+func (h *DB) GetUserHistoryByLogin(login string) ([]models.HistoryEntry, error) {
+    rows, err := h.DB.Query(
+        "SELECT id, expression, result, status FROM history WHERE user_login = ?",
         login,
     )
     if err != nil {
@@ -27,7 +25,7 @@ func GetUserHistoryByLogin(db *sql.DB, login string) ([]models.HistoryEntry, err
     var history []models.HistoryEntry
     for rows.Next() {
         var entry models.HistoryEntry
-        if err := rows.Scan(&entry.ID, &entry.Expression, &entry.Result); err != nil {
+        if err := rows.Scan(&entry.ID, &entry.Expression, &entry.Result, &entry.Status); err != nil {
             return nil, err
         }
         history = append(history, entry)
@@ -35,12 +33,12 @@ func GetUserHistoryByLogin(db *sql.DB, login string) ([]models.HistoryEntry, err
     return history, nil
 }
 
-func GetHistoryEntryByLogin(db *sql.DB, login string) (*models.HistoryEntry, error) {
+func (h *DB) GetHistoryEntryByID(id int32, login string) (*models.HistoryEntry, error) {
     var entry models.HistoryEntry
-    err := db.QueryRow(
-        "SELECT id, user_login, expression, result FROM history WHERE user_login = ?",
-        login,
-    ).Scan(&entry.ID, &entry.UserLogin, &entry.Expression, &entry.Result)
+    err := h.DB.QueryRow(
+        "SELECT id, expression, result, status FROM history WHERE id = ? AND user_login = ?",
+        id, login,
+    ).Scan(&entry.ID, &entry.Expression, &entry.Result, &entry.Status)
 
     if err != nil {
         return nil, err

@@ -1,31 +1,47 @@
 package database
 
 import (
-    "database/sql"
-    "os"
-	
-    _ "github.com/mattn/go-sqlite3"
+	"database/sql"
+	"log"
+	"os"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
-func InitDB() (*sql.DB, error) {
-    db, err := sql.Open("sqlite3", "./calculator.db")
+type DB struct {
+	DB *sql.DB
+}
+
+func InitDB() (*DB, error) {
+    dbPath := "./calculator.db"
+    
+    // Проверяем существование файла базы данных
+    _, err := os.Stat(dbPath)
+    dbExists := err == nil
+
+    db, err := sql.Open("sqlite3", dbPath)
     if err != nil {
         return nil, err
     }
 
-    // Применяем схему
-    if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
-        return nil, err
+    // Применяем схему только если база данных не существовала
+    if !dbExists {
+        log.Println("Create db")
+        if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+            return nil, err
+        }
+
+        schema, err := os.ReadFile("database/schema.sql")
+        if err != nil {
+            return nil, err
+        }
+
+        if _, err := db.Exec(string(schema)); err != nil {
+            return nil, err
+        }
+    } else {
+        log.Println("Db already exists")
     }
 
-    schema, err := os.ReadFile("database/schema.sql")
-    if err != nil {
-        return nil, err
-    }
-
-    if _, err := db.Exec(string(schema)); err != nil {
-        return nil, err
-    }
-
-    return db, nil
+    return &DB{DB: db}, nil
 }

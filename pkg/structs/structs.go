@@ -82,6 +82,12 @@ func (m *SafeExpressionMap) Read(id int32) (Expression, error){
     return m.Expression_map[id], nil
 }
 
+func (m *SafeExpressionMap) Delete(id int32){
+	m.ExpressionMutex.Lock()
+    defer m.ExpressionMutex.Unlock()
+	delete(m.Expression_map, id)
+}
+
 
 
 
@@ -126,4 +132,11 @@ func (m *SafeTaskMap) Write_result(res Result){
         task.Chan <- res.Result
 		m.Task_map[res.Id] = task
     }
+}
+
+func (m *SafeTaskMap) Delete(id int32){
+	m.TaskMutex.Lock()
+    defer m.TaskMutex.Unlock()
+	close(m.Task_map[id].Chan)
+	delete(m.Task_map, id)
 }

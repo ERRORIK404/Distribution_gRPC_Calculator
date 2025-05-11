@@ -1,25 +1,23 @@
 package database
 
 import (
-	"database/sql"
-
 	models "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/db_models"
 )
 
-func CreateUser(db *sql.DB, username, hashpassword string) error {
-    _, err := db.Exec(
-        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-        username, hashpassword,
+func (db *DB) CreateUser(login, hashpassword string) error {
+    _, err := db.DB.Exec(
+        "INSERT INTO users (login, password_hash) VALUES (?, ?)",
+        login, hashpassword,
     )
     return err
 }
 
-func GetUser(db *sql.DB, username string) (*models.User, error) {
+func (db *DB) GetUser(login string) (*models.User, error) {
     var user models.User
-    err := db.QueryRow(
-        "SELECT id, username, password_hash FROM users WHERE username = ?",
-        username,
-    ).Scan(&user.ID, &user.Username, &user.PasswordHash)
+    err := db.DB.QueryRow(
+        "SELECT id, login, password_hash FROM users WHERE login = ?",
+        login,
+    ).Scan(&user.ID, &user.Login, &user.PasswordHash)
 
     if err != nil {
         return nil, err

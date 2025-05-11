@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 
@@ -13,11 +14,12 @@ type Config struct {
 	TIME_MULTIPLICATIONS_MS int // Время выполения умножения в миллисекундах
 	TIME_DIVISIONS_MS int // Время выполнения деления в миллисекундах
 	COMPUTING_POWER int // Количество агентов, то есть количество серверов, которые могут обрабатывать конкретные задачи
+	JWT_SECRET string // Секретный ключ для JWT
 }
 
 
 func LoadConfig() *Config {
-	err := env.Load("environment_variables.env")
+	err := env.Load(".env")
     if err != nil {
         panic("Error loading .env file")
     }
@@ -47,11 +49,17 @@ func LoadConfig() *Config {
         panic("Invalid COMPUTING_POWER")
     }
 
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+        panic("JWT_SECRET is not set")
+    }
+	log.Println("Config loaded")
 	return &Config{
 		TIME_ADDITION_MS: add,
         TIME_SUBTRACTION_MS: sub,
         TIME_MULTIPLICATIONS_MS: mul,
         TIME_DIVISIONS_MS: div,
         COMPUTING_POWER: pow,
+		JWT_SECRET: secret,
 	}
 }

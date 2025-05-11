@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/mattn/go-sqlite3 v1.14.28 // indirect
 	golang.org/x/crypto v0.38.0 // indirect
 	golang.org/x/net v0.26.0 // indirect

@@ -3,13 +3,16 @@ package orchestrator_application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,6 +25,7 @@ import (
 	locerr "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/local_errors"
 	pb "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/proto"
 	structs "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/structs"
+	"github.com/golang-jwt/jwt/v4"
 	"google.golang.org/grpc"
 )
 
@@ -31,7 +35,8 @@ var (
 	expressionsMap = structs.SafeExpressionMap{Expression_map: make(map[int32]structs.Expression)}
 )
 
-
+type contextKey string
+const loginKey contextKey = "login"
 
 // Структура дерева нужна чтобы конвертировать RPN в форму удобную для подсчета выражения с использованием concurrency кода
 type ExprNode struct {
@@ -104,22 +109,30 @@ func (n *ExprNode) EvaluateParallel() float64 {
 		case "+":
 			task := structs.NewTask(left, right, "+", config.TIME_ADDITION_MS)
 			tasksMap.Write(task)
-			return <- tasksMap.Read(task.Id).Chan
+			res := <- tasksMap.Read(task.Id).Chan
+			tasksMap.Delete(task.Id)
+			return res
 		case "-":
 			task := structs.NewTask(left, right, "-", config.TIME_SUBTRACTION_MS)
 			tasksMap.Write(task)
-			return <- tasksMap.Read(task.Id).Chan
+			res := <- tasksMap.Read(task.Id).Chan
+			tasksMap.Delete(task.Id)
+			return res
 		case "*":
 			task := structs.NewTask(left, right, "*", config.TIME_MULTIPLICATIONS_MS)
 			tasksMap.Write(task)
-			return <- tasksMap.Read(task.Id).Chan
+			res := <- tasksMap.Read(task.Id).Chan
+			tasksMap.Delete(task.Id)
+			return res
 		case "/":
 			if right == 0 {
 				return left
 			}
 			task := structs.NewTask(left, right, "/", config.TIME_DIVISIONS_MS)
 			tasksMap.Write(task)
-			return <- tasksMap.Read(task.Id).Chan
+			res := <- tasksMap.Read(task.Id).Chan
+			tasksMap.Delete(task.Id)
+			return res
 		default:
 			return 0
 	}
@@ -153,7 +166,9 @@ func Validator(expression string) (*ExprNode, error) {
 }
 
 // Хендлер для получчения нового выражения
-func Accept_expression_handler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) Accept_expression_handler(w http.ResponseWriter, r *http.Request) {
+	login := r.Context().Value(loginKey).(string)
+
 	expression := structs.NewExpression()
 	type message struct{Message string `json:"expression"`}
 	var str message
@@ -181,13 +196,14 @@ func Accept_expression_handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	type id struct{Id int32 `json:"id"`}
 	json.NewEncoder(w).Encode(id{Id:expression.Id})
-
+	h.db.AddHistoryEntry(expression.Id, login, 0, expression.Expression, "pending")
 	// Запускаем вычисление выражения в отдельном потоке
     go func(){
 		res := result.EvaluateParallel()
 		expression.Result = fmt.Sprintf("%f", res)
 		expression.Status = "success"
-		expressionsMap.Write(expression)
+		h.db.AddHistoryEntry(expression.Id, login, res, expression.Expression, expression.Status)
+		expressionsMap.Delete(expression.Id)
     }()
 }
 
@@ -228,31 +244,185 @@ func (s *Server) SendResult(ctx context.Context, in *pb.ResultRequest) (*pb.Empt
 // 		log.Println(tasksMap.Read(res.Id))
 // 	}
 // }
-
-func Register_user(w http.ResponseWriter, r *http.Request){
-	login := r.FormValue("login")
-	hashpassword, err := hashing.HashPassword(r.FormValue("password"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	err = db.QueryRow("INSERT INTO users (login, password) VALUES (?, ?)", login, hashpassword).Scan(&user.ID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	
+type AuthHandler struct {
+    db *db.DB
 }
 
-// Хендлер для получения истории всех выражений
-func Get_all_expressions_handler(w http.ResponseWriter, r *http.Request) {
-    expressionsMap.ExpressionMutex.RLock()
-    defer expressionsMap.ExpressionMutex.RUnlock()
+func NewAuthHandler(db *db.DB) *AuthHandler {
+    return &AuthHandler{db: db}
+}
 
-    expressions := make([]structs.Expression, 0, len(expressionsMap.Expression_map))
-    for _, expression := range expressionsMap.Expression_map {
-        expressions = append(expressions, expression)
+func AuthMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        cookie, err := r.Cookie("token")
+        if err != nil {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+        log.Println("Cookie found")
+
+        tokenString := cookie.Value
+        login, err := CheckToken(tokenString);
+        if  err != nil  {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+        ctx := context.WithValue(r.Context(), loginKey, login)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+
+var (
+	ErrLoginTooShort      = errors.New("login must be at least 3 characters long")
+	ErrLoginTooLong       = errors.New("login must be no more than 20 characters long")
+	ErrLoginInvalidChars  = errors.New("login can only contain letters, numbers, underscores, and hyphens")
+	ErrLoginStartsWithNum = errors.New("login cannot start with a number")
+)
+
+// ValidateLogin проверяет логин на безопасность и корректность.
+func ValidateLogin(login string) error {
+	// Проверка длины
+	if utf8.RuneCountInString(login) < 3 {
+		return ErrLoginTooShort
+	}
+	if utf8.RuneCountInString(login) > 20 {
+		return ErrLoginTooLong
+	}
+
+	// Проверка первого символа (не должен быть цифрой)
+	if len(login) > 0 && login[0] >= '0' && login[0] <= '9' {
+		return ErrLoginStartsWithNum
+	}
+
+	// Регулярное выражение: только буквы, цифры, "_" и "-"
+	validLoginRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	if !validLoginRegex.MatchString(login) {
+		return ErrLoginInvalidChars
+	}
+
+	return nil
+}
+
+type UsersData struct {
+	Login string
+	Password string
+}
+
+func (h *AuthHandler) Register_user(w http.ResponseWriter, r *http.Request){
+	var user UsersData
+	err := json.NewDecoder(r.Body).Decode(&user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	err = ValidateLogin(user.Login)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	hashpassword, err := hashing.HashPassword(user.Password)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	err = h.db.CreateUser(user.Login, hashpassword)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *AuthHandler) Login_user(w http.ResponseWriter, r *http.Request){
+	var user UsersData
+	err := json.NewDecoder(r.Body).Decode(&user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	hashpassword, err := hashing.HashPassword(user.Password)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	userFromDB, err := h.db.GetUser(user.Login)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if fl := hashing.CheckPassword(userFromDB.PasswordHash, hashpassword); fl != true {
+		http.Error(w, "Invalid password", http.StatusUnauthorized)
+		return
+	}
+	tokenString, err := GenerateToken(user.Login)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: "token",
+		Value: tokenString,
+		Path: "/",
+		HttpOnly: true,
+		Secure: true,
+		Expires: time.Now().Add(time.Minute * 10),
+	})
+}
+
+func GenerateToken(login string) (string, error) {
+	iat := time.Now()
+	exp := iat.Add(time.Minute * 10)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"login": login,
+		"iat": iat.Unix(),
+		"nbf": iat.Unix(),
+		"exp": exp.Unix(),
+	})
+	return token.SignedString([]byte(config.JWT_SECRET))
+}
+
+func CheckToken(tokenString string) (string, error) {
+    // Парсим токен с проверкой секрета
+    token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+        // Проверяем метод подписи
+        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+            return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+        }
+        return []byte(config.JWT_SECRET), nil // Исправлено JMT → JWT
+    })
+
+    if err != nil {
+        return "", fmt.Errorf("token parsing failed: %w", err)
     }
+
+    // Проверяем валидность токена и claims
+    if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+        // Извлекаем login из claims
+        login, ok := claims["login"].(string)
+        if !ok {
+            return "", fmt.Errorf("login claim is missing or invalid")
+        }
+        return login, nil
+    }
+
+    return "", fmt.Errorf("invalid token")
+}
+// Хендлер для получения истории всех выражений
+func (h *AuthHandler) Get_all_expressions_handler(w http.ResponseWriter, r *http.Request) {
+	login := r.Context().Value(loginKey).(string)
+
+
+    expressions := make([]structs.Expression, 0)
+	history, err := h.db.GetUserHistoryByLogin(login)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, expression := range history {
+		expressions = append(expressions, structs.Expression{Id: int32(expression.ID), Expression: expression.Expression, Result: fmt.Sprintf("%f", expression.Result), Status: expression.Status})
+	}
+    
 
     jsonData, err := json.Marshal(expressions)
     if err != nil {
@@ -266,21 +436,22 @@ func Get_all_expressions_handler(w http.ResponseWriter, r *http.Request) {
 }
 
 //Хендре для получения выражения по его индентификатору
-func Get_expression_by_id_handler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) Get_expression_by_id_handler(w http.ResponseWriter, r *http.Request) {
+	login := r.Context().Value(loginKey).(string)
     var id int32
 	n, err := fmt.Sscanf(r.URL.Path, "/api/v1/expressions/%d", &id)
 	if n != 1 || err != nil {
 		http.Error(w, "Invalid ID", http.StatusBadRequest)
 		return
 	}
+	expression, err := h.db.GetHistoryEntryByID(id, login)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
 
-    expression, err := expressionsMap.Read(id)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusNotFound)
-        return
-    }
-
-    jsonData, err := json.Marshal(expression)
+	expressionForResponse := structs.Expression{Id: int32(expression.ID), Expression: expression.Expression, Result: fmt.Sprintf("%f", expression.Result), Status: expression.Status}
+    jsonData, err := json.Marshal(expressionForResponse)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -304,13 +475,25 @@ func RunServer(){
 			log.Fatalf("failed to serve: %v", err)
 		}
 	}()
+	log.Println("Start grpc server")
 
+	dbInstance, err := db.InitDB()
+	if err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
+	log.Println("Start db")
+
+	authHandler := NewAuthHandler(dbInstance)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/expressions", Get_all_expressions_handler)
-	mux.HandleFunc("/api/v1/calculate", Accept_expression_handler)
+	mux.HandleFunc("/api/v1/auth/register", authHandler.Register_user)
+	mux.HandleFunc("/api/v1/auth/login", authHandler.Login_user)
+	mux.Handle("/api/v1/expressions/", AuthMiddleware(http.HandlerFunc(authHandler.Get_expression_by_id_handler)))
+	mux.Handle("/api/v1/expressions", AuthMiddleware(http.HandlerFunc(authHandler.Get_all_expressions_handler)))
+	mux.Handle("/api/v1/calculate", AuthMiddleware(http.HandlerFunc(authHandler.Accept_expression_handler)))
     // mux.HandleFunc("/internal/task", Assigned_task_handler)
-	mux.HandleFunc("/api/v1/expressions/", Get_expression_by_id_handler)
+	
 	go func(){http.ListenAndServe(":8080", mux)}()
+	log.Println("Start http server")
 	for i := 0; i < config.COMPUTING_POWER; i++ {
 		go func() {
 			if agent.AgentRun() != nil{
@@ -318,7 +501,8 @@ func RunServer(){
 			}
 		}()
 	}
+	log.Println("Start agents")
 	for {
-		time.Sleep(time.Minute)
+		time.Sleep(time.Minute * 10)
 	}
 }
