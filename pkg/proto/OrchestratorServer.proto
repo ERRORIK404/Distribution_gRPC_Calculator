@@ -1,0 +1,33 @@
+syntax = "proto3";
+package orchestrator_server;
+option go_package = "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/proto";
+
+message EmptyMessage {}
+
+message Task {
+    int32 Id = 1;
+    float Operand1 = 2;
+    float Operand2 = 3;
+    string Operation = 4;
+    int32 OperationTime = 5;
+    string Status = 6;
+}
+
+message ServerResponse {
+    Task Task = 1;
+}
+
+message Result {
+    int32 Id = 1;
+    float Result = 2;
+}
+
+message ResultRequest {
+    Result Result = 1;
+}
+
+service OrchestratorService {
+    rpc GetTask (EmptyMessage) returns (ServerResponse) {}
+    rpc SendResult (ResultRequest) returns (EmptyMessage) {}
+}
+
