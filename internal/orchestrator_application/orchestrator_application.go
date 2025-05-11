@@ -3,16 +3,13 @@ package orchestrator_application
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -25,7 +22,8 @@ import (
 	locerr "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/local_errors"
 	pb "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/proto"
 	structs "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/structs"
-	"github.com/golang-jwt/jwt/v4"
+	tokenezation "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/tokenezation"
+	validator "github.com/ERRORIK404/Distribution_gRPC_Calculator/pkg/validator"
 	"google.golang.org/grpc"
 )
 
@@ -228,22 +226,7 @@ func (s *Server) SendResult(ctx context.Context, in *pb.ResultRequest) (*pb.Empt
 	tasksMap.Write_result(structs.Result{Id: res.Id, Result: float64(res.Result)})
 	return &pb.EmptyMessage{}, nil
 }
-// Хендер для получения агентом выражения и приема результата от агента в зависимости от http метода
-// func Assigned_task_handler(w http.ResponseWriter, r *http.Request){
-// 	if r.Method == "GET" {
-// 		task, err := tasksMap.Get_does_not_have_result()
-// 		if err != nil {
-//             http.Error(w, err.Error(), http.StatusNotFound)
-//             return
-//         }
-// 		json.NewEncoder(w).Encode(task)
-//     } else if r.Method == "POST"{
-// 		var res structs.Result
-// 		json.NewDecoder(r.Body).Decode(&res)	
-// 		tasksMap.Write_result(res)
-// 		log.Println(tasksMap.Read(res.Id))
-// 	}
-// }
+
 type AuthHandler struct {
     db *db.DB
 }
@@ -262,7 +245,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
         log.Println("Cookie found")
 
         tokenString := cookie.Value
-        login, err := CheckToken(tokenString);
+        login, err := tokenezation.CheckToken(tokenString, config.JWT_SECRET);
         if  err != nil  {
             http.Error(w, "Unauthorized", http.StatusUnauthorized)
             return
@@ -270,37 +253,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
         ctx := context.WithValue(r.Context(), loginKey, login)
         next.ServeHTTP(w, r.WithContext(ctx))
     })
-}
-
-var (
-	ErrLoginTooShort      = errors.New("login must be at least 3 characters long")
-	ErrLoginTooLong       = errors.New("login must be no more than 20 characters long")
-	ErrLoginInvalidChars  = errors.New("login can only contain letters, numbers, underscores, and hyphens")
-	ErrLoginStartsWithNum = errors.New("login cannot start with a number")
-)
-
-// ValidateLogin проверяет логин на безопасность и корректность.
-func ValidateLogin(login string) error {
-	// Проверка длины
-	if utf8.RuneCountInString(login) < 3 {
-		return ErrLoginTooShort
-	}
-	if utf8.RuneCountInString(login) > 20 {
-		return ErrLoginTooLong
-	}
-
-	// Проверка первого символа (не должен быть цифрой)
-	if len(login) > 0 && login[0] >= '0' && login[0] <= '9' {
-		return ErrLoginStartsWithNum
-	}
-
-	// Регулярное выражение: только буквы, цифры, "_" и "-"
-	validLoginRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	if !validLoginRegex.MatchString(login) {
-		return ErrLoginInvalidChars
-	}
-
-	return nil
 }
 
 type UsersData struct {
@@ -316,7 +268,7 @@ func (h *AuthHandler) Register_user(w http.ResponseWriter, r *http.Request){
 		return
 	}
 
-	err = ValidateLogin(user.Login)
+	err = validator.ValidateLogin(user.Login)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -357,7 +309,7 @@ func (h *AuthHandler) Login_user(w http.ResponseWriter, r *http.Request) {
     }
 	log.Println("Login user login: ", user.Login)
     // Генерируем токен
-    tokenString, err := GenerateToken(user.Login)
+    tokenString, err := tokenezation.GenerateToken(user.Login, config.JWT_SECRET)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -374,46 +326,6 @@ func (h *AuthHandler) Login_user(w http.ResponseWriter, r *http.Request) {
     })
 
     w.WriteHeader(http.StatusOK)
-    w.Write([]byte("OK"))
-}
-
-func GenerateToken(login string) (string, error) {
-	iat := time.Now()
-	exp := iat.Add(time.Minute * 10)
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"login": login,
-		"iat": iat.Unix(),
-		"nbf": iat.Unix(),
-		"exp": exp.Unix(),
-	})
-	return token.SignedString([]byte(config.JWT_SECRET))
-}
-
-func CheckToken(tokenString string) (string, error) {
-    // Парсим токен с проверкой секрета
-    token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-        // Проверяем метод подписи
-        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-            return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-        }
-        return []byte(config.JWT_SECRET), nil // Исправлено JMT → JWT
-    })
-
-    if err != nil {
-        return "", fmt.Errorf("token parsing failed: %w", err)
-    }
-
-    // Проверяем валидность токена и claims
-    if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-        // Извлекаем login из claims
-        login, ok := claims["login"].(string)
-        if !ok {
-            return "", fmt.Errorf("login claim is missing or invalid")
-        }
-        return login, nil
-    }
-
-    return "", fmt.Errorf("invalid token")
 }
 // Хендлер для получения истории всех выражений
 func (h *AuthHandler) Get_all_expressions_handler(w http.ResponseWriter, r *http.Request) {
