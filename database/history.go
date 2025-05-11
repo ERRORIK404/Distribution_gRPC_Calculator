@@ -12,6 +12,14 @@ func (h *DB) AddHistoryEntry(id int32, username string,  result float64, expr, s
     return err
 }
 
+func (h *DB) UpdateHistoryEntry(id int32, username string, expr string, result float64, status string) error {
+    _, err := h.DB.Exec(
+        "UPDATE history SET user_login = ?, expression = ?, result = ?, status = ? WHERE id = ?",
+        username, expr, result, status, id,
+    )
+    return err
+}
+
 func (h *DB) GetUserHistoryByLogin(login string) ([]models.HistoryEntry, error) {
     rows, err := h.DB.Query(
         "SELECT id, expression, result, status FROM history WHERE user_login = ?",

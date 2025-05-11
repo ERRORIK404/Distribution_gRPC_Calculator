@@ -202,7 +202,7 @@ func (h *AuthHandler) Accept_expression_handler(w http.ResponseWriter, r *http.R
 		res := result.EvaluateParallel()
 		expression.Result = fmt.Sprintf("%f", res)
 		expression.Status = "success"
-		h.db.AddHistoryEntry(expression.Id, login, res, expression.Expression, expression.Status)
+		h.db.UpdateHistoryEntry(expression.Id, login, expression.Expression, res, expression.Status)
 		expressionsMap.Delete(expression.Id)
     }()
 }
@@ -326,6 +326,7 @@ func (h *AuthHandler) Register_user(w http.ResponseWriter, r *http.Request){
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	log.Println("Create user login: ", user.Login)
 	err = h.db.CreateUser(user.Login, hashpassword)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -334,40 +335,46 @@ func (h *AuthHandler) Register_user(w http.ResponseWriter, r *http.Request){
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (h *AuthHandler) Login_user(w http.ResponseWriter, r *http.Request){
-	var user UsersData
-	err := json.NewDecoder(r.Body).Decode(&user)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	hashpassword, err := hashing.HashPassword(user.Password)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	userFromDB, err := h.db.GetUser(user.Login)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if fl := hashing.CheckPassword(userFromDB.PasswordHash, hashpassword); fl != true {
-		http.Error(w, "Invalid password", http.StatusUnauthorized)
-		return
-	}
-	tokenString, err := GenerateToken(user.Login)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name: "token",
-		Value: tokenString,
-		Path: "/",
-		HttpOnly: true,
-		Secure: true,
-		Expires: time.Now().Add(time.Minute * 10),
-	})
+func (h *AuthHandler) Login_user(w http.ResponseWriter, r *http.Request) {
+    var user UsersData
+    err := json.NewDecoder(r.Body).Decode(&user)
+    if err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+
+    // Получаем пользователя из БД
+    userFromDB, err := h.db.GetUser(user.Login)
+    if err != nil {
+        http.Error(w, "User not found", http.StatusUnauthorized)
+        return
+    }
+
+    // Сравниваем исходный пароль с хешем из БД
+    if !hashing.CheckPassword(userFromDB.PasswordHash, user.Password) {
+        http.Error(w, "Invalid password", http.StatusUnauthorized)
+        return
+    }
+	log.Println("Login user login: ", user.Login)
+    // Генерируем токен
+    tokenString, err := GenerateToken(user.Login)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    // Устанавливаем куки
+    http.SetCookie(w, &http.Cookie{
+        Name:     "token",
+        Value:    tokenString,
+        Path:     "/",
+        HttpOnly: true,
+        Secure:   true,
+        Expires:  time.Now().Add(10 * time.Minute),
+    })
+
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte("OK"))
 }
 
 func GenerateToken(login string) (string, error) {
